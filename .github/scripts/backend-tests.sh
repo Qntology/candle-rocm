@@ -19,14 +19,15 @@ case "$BACKEND" in
 esac
 SEL=(); for p in "${PKGS[@]}"; do SEL+=(-p "$p"); done
 
-# Host-only tests that compile the same with every feature: the cpu job runs them, a GPU job would only repeat them.
-# (accel_kernels_host, and the f64 oracle and host emulation of delta_rule_tests.)
-HOST_ONLY=(
+# The tests of accel_kernels_host.
+HOST_KERNELS=(
   fa_gqa_packed_rows_bit_exact fa_row_kernel fa_tile_v2_kernels fa_tile_v3_kernels fa_varlen_kernels
   fa_half_kv_with_f32_queries fa_paged_row_kernel fa_combine_matches_previous_formula element_decoders_exhaustive
   tq_attention_fp8_fast_and_paged tq_attention_gqa_packed_bit_exact tq_quantize_matches_cpu_codec
-  tq_quantize_half_inputs tq_attention_matches_reference cpu_matches_f64_reference host_emulated_kernels
+  tq_quantize_half_inputs tq_attention_matches_reference
 )
+# Host-only tests that compile the same with every feature: the cpu job runs them, a GPU job would only repeat them.
+HOST_ONLY=("${HOST_KERNELS[@]}" cpu_matches_f64_reference host_emulated_kernels)
 
 # suite <package> <libtest args...> : a GPU job compiles the CPU tests too, the doc tests would only repeat the cpu job.
 suite() {
@@ -106,8 +107,15 @@ candle-core)
     else
       not_run m-invariance-allthreads "no digest from the 1-thread run"
     fi
-    suite candle-core
-    # The same kernel sources hipcc and NVRTC compile, on the host emulator (no GPU needed).
+    # The same kernel sources hipcc and NVRTC compile, on the host emulator (no GPU needed). Every workgroup is 128 host
+    # threads at a barrier: 30 s on 4 Linux cores, over 55 minutes on the 3 cores of the Mac runner without finishing.
+    if [ "${RUNNER_OS:-}" = macOS ]; then
+      not_run accel_kernels_host "too slow on the 3-core Mac runner; the same sources run in linux-cpu and windows-cpu"
+      skips=(--exact); for t in "${HOST_KERNELS[@]}"; do skips+=(--skip "$t"); done
+      suite candle-core "${skips[@]}"
+    else
+      suite candle-core
+    fi
     refuse_skip suite-candle-core "skipping (accel|delta rule) host kernel tests"
   else
     skips=(--exact); for t in "${HOST_ONLY[@]}"; do skips+=(--skip "$t"); done
