@@ -61,7 +61,7 @@ annotate_log() {
   # panic lines with their next lines, then the log tail, joined with " | ".
   local label="$1" log="$2"
   local body
-  body="$(grep -E -A4 "^error(\[|:)|^Error|panicked at|^failures:|assertion|FAILED| case [0-9]+[ :]|failed to run custom build|--- stderr|not found|STATUS_|fatal" "$log" | grep -vE "^--$|^\s*[0-9]+: |^\s+at " | head -40 | sed 's/$/ |/' | tr -d '\n' | cut -c1-2800 | escape)"
+  body="$(grep -E -A4 "^error(\[|:)|^Error|: error:|panicked at|^failures:|assertion .*failed|FAILED| case [0-9]+[ :]|failed to run custom build|--- stderr|not found|STATUS_|fatal" "$log" | grep -vE "^--$|^\s*[0-9]+: |^\s+at " | head -40 | sed 's/$/ |/' | tr -d '\n' | cut -c1-2800 | escape)"
   echo "::error title=$label::$body || tail: $(tail -n 8 "$log" | sed 's/$/ |/' | tr -d '\n' | cut -c1-1000 | escape)"
   local names; names="$(failed_tests "$log")"
   if [ -n "$names" ]; then

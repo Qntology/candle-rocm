@@ -102,7 +102,7 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
+    timeout-minutes: 240
     # A new run of the same target on the same branch cancels only that target's old job
     # (targets outside `[targets: ...]` run to the end).
     concurrency:
@@ -234,10 +234,28 @@ jobs:
         id: build
         timeout-minutes: 100
         run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out build
-      - name: suite (device probe, every non-ignored test, device reports)
+      - name: device probe
+        id: probe
         if: matrix.kind == 'run' || matrix.kind == 'build'
+        timeout-minutes: 15
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out probe
+      # One step per package: its own timeout, and a hang or a failure does not take the results of the others with it.
+      - name: suite candle-core
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success'"
         timeout-minutes: 60
-        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out suite
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out candle-core
+      - name: suite candle-nn
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success'"
+        timeout-minutes: 40
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out candle-nn
+      - name: suite candle-flash-attn
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success' && matrix.backend != 'metal'"
+        timeout-minutes: 20
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out candle-flash-attn
+      - name: device reports (row invariance on the device)
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success' && matrix.backend != 'cpu'"
+        timeout-minutes: 20
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out reports
       - name: type checks (feature sets no job builds, the benches)
         if: "!cancelled() && matrix.name == 'linux-cpu'"
         timeout-minutes: 30
@@ -256,6 +274,10 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" .github/scripts/cuda-arch-sweep.py
+
+      - name: where a step stopped (a timeout leaves no result of its own)
+        if: failure()
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out stopped
 
       - uses: actions/upload-artifact@v6
         if: always()
