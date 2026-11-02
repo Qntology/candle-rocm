@@ -159,6 +159,11 @@ jobs:
           curl -fsSL --retry 3 https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
           . /etc/os-release
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${{ matrix.rocm }} $VERSION_CODENAME main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Ubuntu has its own ROCm 5 packages under the same names with higher version numbers.
+          printf 'Package: *
+Pin: release o=repo.radeon.com
+Pin-Priority: 600
+' | sudo tee /etc/apt/preferences.d/rocm-pin-600
           {
             sudo apt-get update -qq &&
               sudo apt-get install -y -qq --no-install-recommends hipcc hip-dev hip-runtime-amd rocm-llvm rocm-device-libs rocblas rocblas-dev

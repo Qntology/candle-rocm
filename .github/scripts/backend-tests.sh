@@ -59,7 +59,6 @@ runtime_kernels() {
   local root="$ROCM_PATH" tmp f; tmp="$(mktemp -d)"
   if [ "${RUNNER_OS:-}" = Windows ]; then root="$(cygpath -u "$root")"; fi
   local hipcc="$root/bin/hipcc"
-  [ -x "$hipcc" ] || [ -x "$hipcc.exe" ] || hipcc="$(command -v hipcc)"
   # The rule of toolchain::device_lib_dir: the Windows tarball has no <root>/amdgcn.
   [ -d "$root/amdgcn/bitcode" ] || export HIP_DEVICE_LIB_PATH="$ROCM_PATH/lib/llvm/amdgcn/bitcode"
   for f in kernels/*.hip; do
