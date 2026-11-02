@@ -3,7 +3,8 @@
 # GitHub-hosted runners have no GPU. So only what can really run is run:
 #   mac (macos-15, M1 virtual): cpu / metal / vulkan(MoltenVK) — every test on the virtual GPU, the real Mac paths
 #   cpu            : every package's lib, integration and doc tests, the thread-count invariance digest, and the
-#                    HIP / CUDA kernel sources on the host emulator (accel_kernels_host, delta_rule_tests)
+#                    HIP / CUDA kernel sources on the host emulator (accel_kernels_host, delta_rule_tests).
+#                    accel_kernels_host is left out on Mac and reported as NOT RUN: over an hour on the 3-core runner
 #   vulkan (Linux) : lavapipe (software Vulkan, a CPU device): the same tests + every test_device! op on the device
 #   vulkan (Win)   : build + device probe (no software Vulkan ICD is installed) — reported as "build only"
 #   rocm           : real hipcc build of every kernel, test binaries linked against amdhip64 + rocBLAS:
@@ -11,6 +12,7 @@
 #   cuda           : type check with the real nvcc kernel build, plus one kernel compile per GPU-architecture branch
 #                    (.github/scripts/cuda-arch-sweep.py). Not executed, never reported as a pass of a run.
 # Real CUDA / ROCm / Windows-GPU execution needs a self-hosted runner with that GPU (not covered here).
+# A Mac job cancelled with "not acquired by Runner" never started (0 steps): that is the runner queue, not a test result.
 name: cross-verify
 
 on:
