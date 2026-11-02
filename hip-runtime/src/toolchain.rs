@@ -162,6 +162,18 @@ fn find_in_path(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
+/// Device libraries of the installation when clang would not find them: once `ROCM_PATH` names
+/// the root it only looks in `<root>/amdgcn/bitcode`, which the Windows tarball of the ROCm Core
+/// SDK does not have (no symlinks, they are only in `lib/llvm`).
+pub fn device_lib_dir() -> Option<PathBuf> {
+    let root = rocm_root()?;
+    if std::env::var_os("HIP_DEVICE_LIB_PATH").is_some() || root.join("amdgcn").join("bitcode").is_dir() {
+        return None;
+    }
+    let dir = root.join("lib").join("llvm").join("amdgcn").join("bitcode");
+    dir.is_dir().then_some(dir)
+}
+
 /// Path of the `hipcc` driver (`HIPCC` env var, the ROCm root, then `PATH`).
 pub fn hipcc_path() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("HIPCC") {
