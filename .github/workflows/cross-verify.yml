@@ -299,3 +299,4 @@ jobs:
             cuda-check) msg="type check with a real nvcc kernel build (CUDA ${{ matrix.cuda || 'apt' }}, sm_${{ matrix.cuda_cap || '80' }}) + a kernel compile for every GPU-architecture branch the toolkit supports. NOT RUN: any test, any kernel on a GPU, the NVRTC kernels (no NVIDIA GPU)" ;;
           esac
           echo "::notice title=scope ${{ matrix.name }}::$msg"
+          if [ -f out/summary.md ]; then cat out/summary.md >> "$GITHUB_STEP_SUMMARY"; fi

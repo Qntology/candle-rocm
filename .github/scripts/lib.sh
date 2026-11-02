@@ -5,6 +5,7 @@ mkdir -p "$OUT"
 SUMMARY="$OUT/summary.md"
 FAILS=0
 [ -f "$SUMMARY" ] || printf '| step | result | log |\n|---|---|---|\n' > "$SUMMARY"
+SUMMARY_SEEN="$(wc -l < "$SUMMARY")"   # the rows of earlier phases were published by their own step
 
 # run <label> <cmd...> : runs the command, tees to $OUT/<label>.log, records PASS/FAIL.
 PHASE_LABELS=()
@@ -105,7 +106,7 @@ refuse_skip() {
 publish_notices() {
   # Key lines first (one-line summaries), each tagged with its run label, then the detail lines.
   local tmp="$OUT/.measure.txt"
-  local key="DEVICE_PROBE|-M-INV\] 측정 결과|-M-INV\] arch|\[CPU-3-2\]|^test result: FAILED"
+  local key="DEVICE_PROBE|-M-INV\] 측정 결과|-M-INV\] arch|^test result: FAILED"
   local detail="\[VK-HOST-SMALL-M\]|candle gated delta rule: Metal|candle flash-attn: fused kernel unavailable"
   : > "$tmp"
   for tag in ${PHASE_LABELS[@]+"${PHASE_LABELS[@]}"}; do
@@ -118,7 +119,8 @@ publish_notices() {
     [ -f "$f" ] || continue
     grep -E "$detail" "$f" 2>/dev/null | grep -vE "$key" | grep -v '^+ ' | cut -c1-300 | sed "s|^|<$tag> |" >> "$tmp" || true
   done
-  echo "::notice title=summary::$(grep '^| ' "$SUMMARY" | tail -n +2 | sed 's/$/ ;;/' | tr -d '\n' | cut -c1-1800 | escape)"
+  local rows; rows="$(tail -n +$((SUMMARY_SEEN + 1)) "$SUMMARY" | sed 's/$/ ;;/' | tr -d '\n' | cut -c1-1800 | escape)"
+  if [ -n "$rows" ]; then echo "::notice title=summary::$rows"; fi
   # Annotation messages are cut around 4 KB: keep each chunk well below that (Korean is 3 bytes/char).
   local chunk="" n=0
   while IFS= read -r line; do
