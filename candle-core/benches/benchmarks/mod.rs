@@ -40,6 +40,7 @@ impl BenchDevice for Device {
                 #[cfg(not(feature = "metal"))]
                 panic!("Metal device without metal feature enabled: {device:?}")
             }
+            Device::Rocm(_) | Device::OpenCl(_) | Device::Vulkan(_) => self.synchronize(),
         }
     }
 
@@ -57,6 +58,9 @@ impl BenchDevice for Device {
             }
             Device::Cuda(_) => format!("cuda_{}", name.into()),
             Device::Metal(_) => format!("metal_{}", name.into()),
+            Device::Rocm(_) => format!("rocm_{}", name.into()),
+            Device::OpenCl(_) => format!("opencl_{}", name.into()),
+            Device::Vulkan(_) => format!("vulkan_{}", name.into()),
         }
     }
 }
