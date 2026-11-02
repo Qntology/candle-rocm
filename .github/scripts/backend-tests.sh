@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build + tests of one backend, one phase per workflow step (each step has its own timeout and publishes its own
 # annotations, so a slow later phase cannot lose the earlier results). Run at the repository root.
-#   backend-tests.sh cpu|metal|vulkan|cuda|rocm <out-dir> build|suite
+#   backend-tests.sh cpu|metal|vulkan|cuda|rocm <out-dir> build|suite|types
 # Env: REQUIRE_DEVICE=1 : the job exists for this device, so a failed probe fails it instead of being NOT RUN.
 set -euo pipefail
 BACKEND="$1"; OUT="$(mkdir -p "$2" && cd "$2" && pwd)"; export OUT; PHASE="$3"
@@ -56,9 +56,11 @@ kernel_images() {
 
 # runtime_kernels : kernels/*.hip are compiled by hip-runtime at run time, so nothing else in CI ever compiles them.
 runtime_kernels() {
-  local hipcc="$ROCM_PATH/bin/hipcc" tmp; tmp="$(mktemp -d)"
-  [ "${RUNNER_OS:-}" = Windows ] && hipcc="$ROCM_PATH/bin/hipcc.exe"
-  local f
+  local root="$ROCM_PATH" tmp f; tmp="$(mktemp -d)"
+  if [ "${RUNNER_OS:-}" = Windows ]; then root="$(cygpath -u "$root")"; fi
+  local hipcc="$root/bin/hipcc"
+  # The rule of toolchain::device_lib_dir: the Windows tarball has no <root>/amdgcn.
+  [ -d "$root/amdgcn/bitcode" ] || export HIP_DEVICE_LIB_PATH="$ROCM_PATH/lib/llvm/amdgcn/bitcode"
   for f in kernels/*.hip; do
     run "hipcc-$(basename "$f" .hip)" "$hipcc" --genco --offload-arch=gfx1030 -O3 -o "$tmp/$(basename "$f" .hip).co" "$f"
   done
@@ -79,12 +81,14 @@ build)
     ;;
   *)
     for p in "${PKGS[@]}"; do run "build-$p" cargo test --release --no-run -p "$p" "${FEAT[@]}"; done
-    if [ "$BACKEND" = cpu ] && [ "${RUNNER_OS:-}" = Linux ]; then
-      run check-no-default-features cargo check "${SEL[@]}" --no-default-features --all-targets
-      run check-opencl cargo check -p candle-core --features opencl --all-targets
-    fi
     ;;
   esac
+  ;;
+types)
+  # Feature sets no other job builds, and the benches, which no test run compiles. The OS does not change any of them.
+  run check-all-targets cargo check "${SEL[@]}" --all-targets
+  run check-no-default-features cargo check "${SEL[@]}" --no-default-features --all-targets
+  run check-opencl cargo check -p candle-core --features opencl --all-targets
   ;;
 suite)
   case "$BACKEND" in

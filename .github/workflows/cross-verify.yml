@@ -69,8 +69,9 @@ jobs:
             dict(name="linux-cpu", os="ubuntu-latest", kind="run", backend="cpu"),
             dict(name="linux-vulkan", os="ubuntu-latest", kind="run", backend="vulkan"),
             dict(name="linux-cuda", os="ubuntu-latest", kind="cuda-check", backend="cuda"),
-            # legacy track: apt packages. This is the ROCm generation of the AMD HIP SDK 7.2 the Windows builds use.
-            dict(name="linux-rocm", os="ubuntu-latest", kind="rocm-build", backend="rocm", rocm="7.2.4"),
+            # legacy track: apt packages, the ROCm generation of the AMD HIP SDK 7.2 the Windows builds use.
+            # AMD's repository stops at noble, ubuntu-latest is past it.
+            dict(name="linux-rocm", os="ubuntu-24.04", kind="rocm-build", backend="rocm", rocm="7.2.4"),
             dict(name="linux-rocm-core", os="ubuntu-latest", kind="rocm-build", backend="rocm", rocm="10.1.0"),
             dict(name="windows-cpu", os="windows-latest", kind="run", backend="cpu"),
             dict(name="windows-vulkan", os="windows-latest", kind="build", backend="vulkan"),
@@ -118,7 +119,7 @@ jobs:
       # kind `run` exists for the device of its backend: without it the job fails instead of reporting NOT RUN.
       REQUIRE_DEVICE: ${{ matrix.kind == 'run' && '1' || '0' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: environment report (runner, before setup)
         run: .github/scripts/env-report.sh before-setup
       - uses: dtolnay/rust-toolchain@master
@@ -158,8 +159,10 @@ jobs:
           curl -fsSL --retry 3 https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
           . /etc/os-release
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${{ matrix.rocm }} $VERSION_CODENAME main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends hipcc hip-dev hip-runtime-amd rocm-llvm rocm-device-libs rocblas rocblas-dev
+          {
+            sudo apt-get update -qq &&
+              sudo apt-get install -y -qq --no-install-recommends hipcc hip-dev hip-runtime-amd rocm-llvm rocm-device-libs rocblas rocblas-dev
+          } > "$RUNNER_TEMP/apt.log" 2>&1 || { echo "::error title=apt::$(tail -12 "$RUNNER_TEMP/apt.log" | tr '\n' ' ' | cut -c1-3000)"; exit 1; }
           echo "ROCM_PATH=$(ls -d /opt/rocm-* | sort -V | tail -1)" >> "$GITHUB_ENV"
       - name: ROCm Core SDK (AMD tarball; the compiler knows every target, the bundle only names the rocBLAS kernels)
         if: matrix.backend == 'rocm' && startsWith(matrix.rocm, '10.')
@@ -168,8 +171,8 @@ jobs:
           case "$RUNNER_OS" in Windows) os=windows ;; *) os=linux ;; esac
           curl -fsSL --retry 3 -o rocm.tar.gz "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-$os-gfx103X-all-${{ matrix.rocm }}.tar.gz"
           mkdir rocm
-          # 4 GB of static device libraries and the rocBLAS kernels: nothing here links or loads them.
-          tar -xzf rocm.tar.gz -C rocm --exclude='./lib/device_*' --exclude='./.kpack'
+          # 4 GB of static device libraries, MIOpen databases and rocBLAS kernels: nothing here links or loads them.
+          tar -xzf rocm.tar.gz -C rocm --exclude='./lib/device_*' --exclude='./lib/libdevice_*' --exclude='./share/miopen' --exclude='./.kpack'
           rm rocm.tar.gz
           root="$PWD/rocm"
           if [ "$RUNNER_OS" = Windows ]; then root="$(cygpath -w "$root")"; fi
@@ -235,6 +238,10 @@ jobs:
         if: matrix.kind == 'run' || matrix.kind == 'build'
         timeout-minutes: 60
         run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out suite
+      - name: type checks (feature sets no job builds, the benches)
+        if: "!cancelled() && matrix.name == 'linux-cpu'"
+        timeout-minutes: 30
+        run: .github/scripts/backend-tests.sh cpu out types
 
       # ── scope: say plainly what this job covered (a skipped stage is not a pass) ──
       - name: CUDA architecture sweep (one architecture per kernel branch, derived from the sources and the toolkit)
@@ -250,7 +257,7 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" .github/scripts/cuda-arch-sweep.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: cross-${{ matrix.name }}
