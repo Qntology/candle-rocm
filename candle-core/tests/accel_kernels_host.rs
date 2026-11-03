@@ -21,8 +21,10 @@ fn harness() -> Option<&'static Path> {
         let src =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kernels/tests/accel_host_test.cpp");
         let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+        // No fused a * b + c: the bit-exact tests compare two differently shaped kernels, and a
+        // compiler that targets FMA by default (g++ on Ubuntu 26.04) fuses them differently.
         let out = Command::new(&cxx)
-            .args(["-std=c++20", "-O2", "-pthread", "-o"])
+            .args(["-std=c++20", "-O2", "-ffp-contract=off", "-pthread", "-o"])
             .arg(&bin)
             .arg(&src)
             .output();

@@ -1,0 +1,2 @@
+# Shell scripts need LF: the Windows runners check out with core.autocrlf=true, and bash then fails on the CR.
+*.sh text eol=lf

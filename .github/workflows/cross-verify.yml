@@ -1,0 +1,304 @@
+# Linux / macOS / Windows verification of the fork. Same structure as logis-center's cross-verify.yml.
+#
+# GitHub-hosted runners have no GPU. So only what can really run is run:
+#   mac (macos-15, M1 virtual): cpu / metal / vulkan(MoltenVK) — every test on the virtual GPU, the real Mac paths
+#   cpu            : every package's lib, integration and doc tests, the thread-count invariance digest, and the
+#                    HIP / CUDA kernel sources on the host emulator (accel_kernels_host, delta_rule_tests).
+#                    accel_kernels_host is left out on Mac and reported as NOT RUN: over an hour on the 3-core runner
+#   vulkan (Linux) : lavapipe (software Vulkan, a CPU device): the same tests + every test_device! op on the device
+#   vulkan (Win)   : build + device probe (no software Vulkan ICD is installed) — reported as "build only"
+#   rocm           : real hipcc build of every kernel, test binaries linked against amdhip64 + rocBLAS:
+#                    legacy track on Linux (ROCm 7.2), core track on Linux and Windows (ROCm Core SDK 10.1). Not executed.
+#   cuda           : type check with the real nvcc kernel build, plus one kernel compile per GPU-architecture branch
+#                    (.github/scripts/cuda-arch-sweep.py). Not executed, never reported as a pass of a run.
+# Real CUDA / ROCm / Windows-GPU execution needs a self-hosted runner with that GPU (not covered here).
+# A Mac job cancelled with "not acquired by Runner" never started (0 steps): that is the runner queue, not a test result.
+name: cross-verify
+
+on:
+  # Every push to any branch runs all targets. Docs alone do not, and an empty commit is filtered out with them: use
+  # Re-run or workflow_dispatch to repeat a run. A workflow file that is not on the default branch cannot be dispatched,
+  # so the working branch is triggered by push as well.
+  # `[skip ci]` in the head commit message skips it. `[targets: linux-cpu,mac-metal]` alone on a line of the head commit
+  # message runs only those jobs (no duplicate runs of what did not change); workflow_dispatch takes the same list.
+  push:
+    branches: ["**"]
+    paths-ignore: ["**/*.md", "docs/**"]
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "comma list of: mac-cpu, mac-metal, mac-vulkan, linux-cpu, linux-vulkan, linux-cuda, linux-rocm, linux-rocm-core, windows-cpu, windows-vulkan, windows-cuda, windows-cuda12, windows-rocm (all = every one)"
+        default: "all"
+
+permissions:
+  contents: read
+
+env:
+  # One toolchain for every OS and every run. Raise it here, in one place, and the cache keys follow.
+  RUST_VERSION: "1.99.0"
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        shell: bash
+        env:
+          TARGETS: ${{ inputs.targets || '' }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # stdout of the script = the matrix (GITHUB_OUTPUT); stderr = a human line, shown as an annotation either way
+          python3 - > "$RUNNER_TEMP/plan.out" 2> "$RUNNER_TEMP/plan.err" <<'PY' || { echo "::error title=plan::$(cat "$RUNNER_TEMP/plan.err")"; exit 1; }
+          import json, os, re, sys
+          t = os.environ.get("TARGETS", "").strip()
+          if not t:
+              # Only a line that holds nothing but the token counts (prose that mentions `[targets: ...]` must not
+              # select anything); with several such lines the last one wins.
+              found = re.findall(r"(?m)^[ \t]*\[targets:[ \t]*([^\]\n]+)\][ \t]*$", os.environ.get("COMMIT_MSG", ""))
+              t = found[-1] if found else "all"
+          t = t.replace(" ", "")
+          want = None if t == "all" else set(t.split(","))
+          inc = [
+            dict(name="mac-cpu", os="macos-15", kind="run", backend="cpu"),
+            dict(name="mac-metal", os="macos-15", kind="run", backend="metal"),
+            dict(name="mac-vulkan", os="macos-15", kind="run", backend="vulkan"),
+            dict(name="linux-cpu", os="ubuntu-latest", kind="run", backend="cpu"),
+            dict(name="linux-vulkan", os="ubuntu-latest", kind="run", backend="vulkan"),
+            dict(name="linux-cuda", os="ubuntu-latest", kind="cuda-check", backend="cuda"),
+            # legacy track: apt packages, the ROCm generation of the AMD HIP SDK 7.2 the Windows builds use.
+            # AMD's repository stops at noble, ubuntu-latest is past it.
+            dict(name="linux-rocm", os="ubuntu-24.04", kind="rocm-build", backend="rocm", rocm="7.2.4"),
+            dict(name="linux-rocm-core", os="ubuntu-latest", kind="rocm-build", backend="rocm", rocm="10.1.0"),
+            dict(name="windows-cpu", os="windows-latest", kind="run", backend="cpu"),
+            dict(name="windows-vulkan", os="windows-latest", kind="build", backend="vulkan"),
+            # CUDA 13 + VS 2026 (MSVC 14.51).
+            # sm_80, not sm_75: candle-kernels 0.11.0 compatibility.cuh defines __hmax_nan / __hmin_nan for
+            # __CUDA_ARCH__ < 800, and the CUDA 13.2 headers already define them -> "already been defined".
+            dict(name="windows-cuda", os="windows-latest", kind="cuda-check", backend="cuda", cuda="13.2.0", cuda_cap="80"),
+            # CUDA 12 (Pascal / Volta can only be built for by a 12.x toolkit) needs a VS 2022 toolset
+            dict(name="windows-cuda12", os="windows-2022", kind="cuda-check", backend="cuda", cuda="12.6.2", cuda_cap="80"),
+            # The AMD HIP SDK has no unattended download, so Windows builds with the core track tarball.
+            dict(name="windows-rocm", os="windows-latest", kind="rocm-build", backend="rocm", rocm="10.1.0"),
+          ]
+          unknown = (want or set()) - {i["name"] for i in inc}
+          if unknown:
+              print("unknown targets: " + ",".join(sorted(unknown)) + "  (valid: " + ",".join(i["name"] for i in inc) + ")", file=sys.stderr)
+              sys.exit(1)
+          inc = [i for i in inc if want is None or i["name"] in want]
+          print("targets: " + ",".join(i["name"] for i in inc), file=sys.stderr)
+          print("matrix=" + json.dumps({"include": inc}))
+          PY
+          cat "$RUNNER_TEMP/plan.out" >> "$GITHUB_OUTPUT"
+          echo "::notice title=targets::$(cat "$RUNNER_TEMP/plan.err")"
+
+  cross:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    # A new run of the same target on the same branch cancels only that target's old job
+    # (targets outside `[targets: ...]` run to the end).
+    concurrency:
+      group: cross-verify-${{ github.ref }}-${{ matrix.name }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      # cuda: no GPU to detect the compute capability from, so it is set per job (default sm_80, Ampere).
+      CUDA_COMPUTE_CAP: ${{ matrix.cuda_cap || '80' }}
+      # rocm: the targets the README states the kernels compile for, plus the RX 6600 (gfx1032).
+      CANDLE_ROCM_ARCHS: ${{ matrix.rocm && 'gfx90a,gfx942,gfx1030,gfx1032,gfx1100,gfx1201' || '' }}
+      # kind `run` exists for the device of its backend: without it the job fails instead of reporting NOT RUN.
+      REQUIRE_DEVICE: ${{ matrix.kind == 'run' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: environment report (runner, before setup)
+        run: .github/scripts/env-report.sh before-setup
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      # Dependencies only, also after a failed job. A plain target dir per job would push the caches of the other jobs out
+      # of the 10 GB of a repository. The workspace crates are not kept, so the kernels are always compiled for real.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}${{ matrix.backend == 'cuda' && format('-cuda{0}-sm{1}', matrix.cuda || 'apt', matrix.cuda_cap || '80') || '' }}
+          cache-on-failure: true
+      - name: Cargo.lock matches Cargo.toml (warning only)
+        if: matrix.name == 'linux-cpu'
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null || \
+            echo "::warning title=Cargo.lock::does not match Cargo.toml, missing dependencies resolve to the newest version on every run; commit the updated Cargo.lock"
+
+      - name: macOS — MoltenVK
+        if: matrix.name == 'mac-vulkan'
+        # candle finds libvulkan.dylib in /opt/homebrew/lib by itself (SIP strips DYLD_* from protected launchers)
+        run: |
+          brew install molten-vk vulkan-loader vulkan-tools >/dev/null 2>&1 || brew install molten-vk vulkan-loader vulkan-tools
+          echo "VK_ICD_FILENAMES=$(brew --prefix molten-vk)/etc/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
+      - name: software Vulkan (lavapipe)
+        if: matrix.name == 'linux-vulkan'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mesa-vulkan-drivers libvulkan1 vulkan-tools
+          icd="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "CANDLE_VULKAN_ALLOW_CPU=1" >> "$GITHUB_ENV"
+
+      - name: ROCm legacy track (AMD apt repository; hipcc and rocBLAS, no driver, no GPU)
+        if: matrix.backend == 'rocm' && startsWith(matrix.rocm, '7.')
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL --retry 3 https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          . /etc/os-release
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${{ matrix.rocm }} $VERSION_CODENAME main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Ubuntu has its own ROCm 5 packages under the same names with higher version numbers.
+          printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' | sudo tee /etc/apt/preferences.d/rocm-pin-600
+          {
+            sudo apt-get update -qq &&
+              sudo apt-get install -y -qq --no-install-recommends hipcc hip-dev hip-runtime-amd rocm-llvm rocm-device-libs rocblas rocblas-dev
+          } > "$RUNNER_TEMP/apt.log" 2>&1 || { echo "::error title=apt::$(tail -12 "$RUNNER_TEMP/apt.log" | tr '\n' ' ' | cut -c1-3000)"; exit 1; }
+          echo "ROCM_PATH=$(ls -d /opt/rocm-* | sort -V | tail -1)" >> "$GITHUB_ENV"
+      - name: ROCm Core SDK (AMD tarball; the compiler knows every target, the bundle only names the rocBLAS kernels)
+        if: matrix.backend == 'rocm' && startsWith(matrix.rocm, '10.')
+        working-directory: ${{ runner.temp }}
+        run: |
+          case "$RUNNER_OS" in Windows) os=windows ;; *) os=linux ;; esac
+          curl -fsSL --retry 3 -o rocm.tar.gz "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-$os-gfx103X-all-${{ matrix.rocm }}.tar.gz"
+          mkdir rocm
+          # 4 GB of static device libraries, MIOpen databases and rocBLAS kernels: nothing here links or loads them.
+          tar -xzf rocm.tar.gz -C rocm --exclude='./lib/device_*' --exclude='./lib/libdevice_*' --exclude='./share/miopen' --exclude='./.kpack'
+          rm rocm.tar.gz
+          root="$PWD/rocm"
+          if [ "$RUNNER_OS" = Windows ]; then root="$(cygpath -w "$root")"; fi
+          echo "ROCM_PATH=$root" >> "$GITHUB_ENV"
+
+      - name: CUDA toolkit (apt nvcc for the kernel build; no GPU)
+        if: matrix.name == 'linux-cuda'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nvidia-cuda-toolkit
+      - name: CUDA toolkit 13 (Windows; all components, names differ from 12)
+        if: matrix.backend == 'cuda' && runner.os == 'Windows' && startsWith(matrix.cuda, '13.')
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+      - name: CUDA toolkit 12 (Windows; nvcc, headers, libs — no GPU)
+        if: matrix.backend == 'cuda' && runner.os == 'Windows' && startsWith(matrix.cuda, '12.')
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev"]'
+      - name: nvcc flags for CUDA 13 (CCCL needs the standard preprocessor)
+        if: startsWith(matrix.cuda, '13.')
+        run: echo "NVCC_PREPEND_FLAGS=-Xcompiler /Zc:preprocessor" >> "$GITHUB_ENV"
+      - name: MSVC developer environment (nvcc needs cl.exe in PATH)
+        if: matrix.backend == 'cuda' && runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with: { arch: x64 }
+      - name: Git for Windows link.exe shadows MSVC link.exe once the MSVC env is on PATH — move it away
+        if: matrix.backend == 'cuda' && runner.os == 'Windows'
+        run: |
+          if [ -f /usr/bin/link.exe ]; then mv /usr/bin/link.exe /usr/bin/link_git.exe; echo "moved Git link.exe"; fi
+          where.exe link
+      - name: NVCC_CCBIN = the cl.exe on PATH (cudaforge then passes -ccbin and -allow-unsupported-compiler)
+        if: matrix.backend == 'cuda' && runner.os == 'Windows'
+        run: |
+          cl_path="$(where.exe cl | head -1 | tr -d '\r')"
+          echo "cl.exe: $cl_path"
+          echo "NVCC_CCBIN=$cl_path" >> "$GITHUB_ENV"
+      - name: nvcc direct diagnostic (surfaces nvcc's own message; same flags as candle-kernels)
+        if: matrix.backend == 'cuda'
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        run: |
+          printf '__global__ void k(float* x){ x[0] = 1.0f; }\n' > t.cu
+          set +e
+          extra=(); [ -n "${NVCC_CCBIN:-}" ] && extra=(-allow-unsupported-compiler -ccbin "$NVCC_CCBIN")
+          nvcc -gencode arch=compute_${CUDA_COMPUTE_CAP:-80},code=sm_${CUDA_COMPUTE_CAP:-80} --expt-relaxed-constexpr -std=c++17 -O3 "${extra[@]}" -c t.cu -o t.obj > nvcc.log 2>&1; rc=$?
+          cat nvcc.log
+          msg="rc=$rc ccbin=${NVCC_CCBIN:-<none>}: $(head -c 1500 nvcc.log | tr '\r\n' '  ' | sed 's/%/%25/g')"
+          if [ "$rc" = 0 ]; then echo "::notice title=nvcc diagnostic::$msg"; else echo "::error title=nvcc diagnostic::$msg"; exit 1; fi
+
+      - name: environment report (after setup, before build)
+        run: .github/scripts/env-report.sh before-build
+
+      - name: build
+        id: build
+        timeout-minutes: 100
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out build
+      - name: device probe
+        id: probe
+        if: matrix.kind == 'run' || matrix.kind == 'build'
+        timeout-minutes: 15
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out probe
+      # One step per package: its own timeout, and a hang or a failure does not take the results of the others with it.
+      - name: suite candle-core
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success'"
+        timeout-minutes: 60
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out candle-core
+      - name: suite candle-nn
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success'"
+        timeout-minutes: 40
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out candle-nn
+      - name: suite candle-flash-attn
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success' && matrix.backend != 'metal'"
+        timeout-minutes: 20
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out candle-flash-attn
+      - name: device reports (row invariance on the device)
+        if: "!cancelled() && matrix.kind == 'run' && steps.probe.outcome == 'success' && matrix.backend != 'cpu'"
+        timeout-minutes: 20
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out reports
+      - name: type checks (feature sets no job builds, the benches)
+        if: "!cancelled() && matrix.name == 'linux-cpu'"
+        timeout-minutes: 30
+        run: .github/scripts/backend-tests.sh cpu out types
+
+      # ── scope: say plainly what this job covered (a skipped stage is not a pass) ──
+      - name: CUDA architecture sweep (one architecture per kernel branch, derived from the sources and the toolkit)
+        if: always() && matrix.backend == 'cuda'
+        env:
+          # the architecture the build step compiled is not compiled twice (only when that step passed)
+          SWEEP_SKIP: ${{ steps.build.outcome == 'success' && (matrix.cuda_cap || '80') || '' }}
+          SWEEP_MINUTES: ${{ runner.os == 'Windows' && '75' || '60' }}
+          # lowest GPU generation the project builds for (Ampere, sm_80 = what the build step compiles). Below it a failure is a warning:
+          # crates.io candle-kernels 0.11.0 does not compile below sm_80 on CUDA 13 (__hmax_nan redefinition) nor below sm_70 on CUDA 12.
+          SWEEP_MIN_SM: "80"
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" .github/scripts/cuda-arch-sweep.py
+
+      - name: where a step stopped (a timeout leaves no result of its own)
+        if: failure()
+        run: .github/scripts/backend-tests.sh "${{ matrix.backend }}" out stopped
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: cross-${{ matrix.name }}
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: scope of this job
+        if: always()
+        run: |
+          case "${{ matrix.kind }}" in
+            run)        msg="build + every non-ignored test on this runner's device (${{ matrix.backend }}). NOT RUN: real CUDA / ROCm / Windows-GPU execution" ;;
+            build)      msg="build + device probe. NOT RUN: tests (no software Vulkan driver on this runner)" ;;
+            rocm-build) msg="real hipcc build of every kernel (ROCm ${{ matrix.rocm }}, $CANDLE_ROCM_ARCHS) and test binaries linked against amdhip64 + rocBLAS. NOT RUN: any test, any kernel on a GPU (no AMD GPU)" ;;
+            cuda-check) msg="type check with a real nvcc kernel build (CUDA ${{ matrix.cuda || 'apt' }}, sm_${{ matrix.cuda_cap || '80' }}) + a kernel compile for every GPU-architecture branch the toolkit supports. NOT RUN: any test, any kernel on a GPU, the NVRTC kernels (no NVIDIA GPU)" ;;
+          esac
+          echo "::notice title=scope ${{ matrix.name }}::$msg"
+          if [ -f out/summary.md ]; then cat out/summary.md >> "$GITHUB_STEP_SUMMARY"; fi

@@ -122,6 +122,9 @@ pub fn compile_kernel(src: &Path, out: &Path, arch: &str) -> Result<()> {
         msg: "hipcc not found (set HIPCC, ROCM_PATH or HIP_PATH)".to_string(),
     })?;
     let mut cmd = std::process::Command::new(&hipcc);
+    if let Some(dir) = crate::toolchain::device_lib_dir() {
+        cmd.env("HIP_DEVICE_LIB_PATH", dir);
+    }
     cmd.arg("--genco");
     for a in arch.split([',', ';', ' ']).filter(|s| !s.is_empty()) {
         cmd.arg(format!("--offload-arch={a}"));

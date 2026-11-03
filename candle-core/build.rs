@@ -274,8 +274,20 @@ fn detect_archs(root: Option<&Path>) -> Vec<String> {
     archs
 }
 
+/// Device libraries of `root` when clang would not find them: once `ROCM_PATH` or `--rocm-path`
+/// names the root it only looks in `<root>/amdgcn/bitcode`. That is a directory in the legacy
+/// layout and a symlink in the Linux tarball of the ROCm Core SDK; the Windows tarball has no
+/// symlinks, there they are only in `lib/llvm`.
+fn device_lib_dir(root: &Path) -> Option<PathBuf> {
+    if std::env::var_os("HIP_DEVICE_LIB_PATH").is_some() || root.join("amdgcn").join("bitcode").is_dir() {
+        return None;
+    }
+    let dir = root.join("lib").join("llvm").join("amdgcn").join("bitcode");
+    dir.is_dir().then_some(dir)
+}
+
 fn base_command(compiler: &Compiler, root: Option<&Path>) -> Command {
-    match compiler {
+    let mut cmd = match compiler {
         Compiler::Hipcc(p) => {
             let mut c = Command::new(p);
             c.arg("--genco");
@@ -289,7 +301,11 @@ fn base_command(compiler: &Compiler, root: Option<&Path>) -> Command {
             }
             c
         }
+    };
+    if let Some(dir) = root.and_then(device_lib_dir) {
+        cmd.env("HIP_DEVICE_LIB_PATH", dir);
     }
+    cmd
 }
 
 /// Drops the targets that the compiler does not know (only for the built-in target lists, an
@@ -359,6 +375,7 @@ fn main() {
         "HIP_PATH",
         "HIPCC",
         "HIP_ARCH",
+        "HIP_DEVICE_LIB_PATH",
         "CANDLE_ROCM_ARCHS",
         "CANDLE_ROCM_TRACK",
         "CANDLE_ROCM_SKIP_KERNEL_BUILD",
